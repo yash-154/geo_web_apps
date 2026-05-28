@@ -4,6 +4,7 @@ import VectorSource from 'ol/source/Vector';
 import VectorLayer from 'ol/layer/Vector';
 import { Fill, Stroke, Style, Circle } from 'ol/style';
 import shp from 'shpjs';
+import { API_BASE } from '../utils/api';
 import { hexToRgb } from '../utils/colorUtils';
 
 export default function useLayers(context) {
@@ -374,7 +375,7 @@ export default function useLayers(context) {
       if (!layerCfg?.apiLayer) return;
       if (Array.isArray(attributeStyleColumns[layerCfg.id]) && attributeStyleColumns[layerCfg.id].length) return;
       try {
-        const res = await fetch(`http://192.168.20.57:7000/api/attributes/?layer=${layerCfg.apiLayer}&limit=1`);
+        const res = await fetch(`${API_BASE}/api/attributes/?layer=${layerCfg.apiLayer}&limit=1`);
         const json = await res.json();
         const cols = Array.isArray(json?.columns) ? json.columns : [];
         setAttributeStyleColumns((prev) => ({ ...prev, [layerCfg.id]: cols }));

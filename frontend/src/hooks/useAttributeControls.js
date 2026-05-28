@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo } from 'react';
+import { API_BASE } from '../utils/api';
 
 export default function useAttributeControls(context) {
   const {
@@ -149,7 +150,7 @@ export default function useAttributeControls(context) {
           params.set('q', query.value.trim());
         }
         const res = await fetch(
-          `http://192.168.20.57:7000/api/attributes/distinct/?${params.toString()}`,
+          `${API_BASE}/api/attributes/distinct/?${params.toString()}`,
           { signal: controller.signal }
         );
         const json = await res.json();

@@ -1,3 +1,5 @@
+export const API_BASE = (process.env.REACT_APP_API_BASE_URL || '').replace(/\/$/, '');
+
 export async function getJson(url, opts = {}) {
   const res = await fetch(url, opts);
   if (!res.ok) {

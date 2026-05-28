@@ -1557,7 +1557,7 @@ def geoserver_proxy(request, path=''):
     Routes requests to the configured GeoServer instance.
     """
     # Build the GeoServer URL
-    geoserver_base = "http://192.168.20.57:5855/geoserver"
+    geoserver_base = settings.GEOSERVER_BASE_URL
     
     # Reconstruct the query string from GET parameters
     query_params = request.GET.urlencode()

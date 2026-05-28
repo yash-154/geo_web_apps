@@ -24,7 +24,7 @@ import Tabs from 'react-bootstrap/Tabs';
 import Tab from 'react-bootstrap/Tab';
 import Cesium3DView from './Cesium3DView';
 import { BASEMAP_OPTIONS } from './basemaps';
-import { postJson } from './utils/api';
+import { API_BASE, postJson } from './utils/api';
 import LayersTab from './components/LayersTab';
 import AttributesTab from './components/AttributesTab';
 import QueryTab from './components/QueryTab';
@@ -83,13 +83,13 @@ const serializeStyleState = ({ namedStyles, layersConfig, layerStyleSelections }
 
 
 export default function MapView() {
-  const GEOSERVER_PROXY_BASE = 'http://192.168.20.57:7000/api/geoserver';
-  const RASTER_API_BASE = 'http://192.168.20.57:7000/api/raster';
-  const THREE_D_TILES_API_BASE = 'http://192.168.20.57:7000/api/3d-tiles';
-  const STYLES_API_BASE = 'http://192.168.20.57:7000/api/styles';
-  const ANALYSIS_API_BASE = 'http://192.168.20.57:7000/api/analysis';
-  const OSM_QUERY_API = 'http://192.168.20.57:7000/api/osm/query/';
-  const CHAT_API_URL = 'http://192.168.20.57:7000/api/chat/';
+  const GEOSERVER_PROXY_BASE = `${API_BASE}/api/geoserver`;
+  const RASTER_API_BASE = `${API_BASE}/api/raster`;
+  const THREE_D_TILES_API_BASE = `${API_BASE}/api/3d-tiles`;
+  const STYLES_API_BASE = `${API_BASE}/api/styles`;
+  const ANALYSIS_API_BASE = `${API_BASE}/api/analysis`;
+  const OSM_QUERY_API = `${API_BASE}/api/osm/query/`;
+  const CHAT_API_URL = `${API_BASE}/api/chat/`;
   const mapRef = useRef(null);
   const layersRef = useRef({});
   const popupRef = useRef(null);
@@ -845,7 +845,7 @@ export default function MapView() {
       return;
     }
     try {
-      const res = await fetch(`http://192.168.20.57:7000/api/attributes/?layer=${layerCfg.apiLayer}&limit=1`);
+      const res = await fetch(`${API_BASE}/api/attributes/?layer=${layerCfg.apiLayer}&limit=1`);
       const json = await res.json();
       const cols = Array.isArray(json?.columns) ? json.columns : [];
       setAttributeStyleColumns((prev) => ({ ...prev, [layerCfg.id]: cols }));
@@ -875,7 +875,7 @@ export default function MapView() {
         });
         if (draft.value.trim()) params.set('q', draft.value.trim());
         const res = await fetch(
-          `http://192.168.20.57:7000/api/attributes/distinct/?${params.toString()}`,
+          `${API_BASE}/api/attributes/distinct/?${params.toString()}`,
           { signal: controller.signal }
         );
         const json = await res.json();
@@ -903,7 +903,7 @@ export default function MapView() {
   }, [addingStyleForLayer, attributeStyleDrafts, layersConfig]);
 
   const fetchAttributes = useCallback(async (layer, cql = null, title = null) => {
-    let url = `http://192.168.20.57:7000/api/attributes/?layer=${layer}&limit=50`;
+    let url = `${API_BASE}/api/attributes/?layer=${layer}&limit=50`;
     if (cql) url += `&cql=${encodeURIComponent(cql)}`;
 
     try {
@@ -1343,7 +1343,7 @@ export default function MapView() {
       visible: false,
       opacity: 1,
       source: new TileWMS({
-        url: 'http://192.168.20.57:7000/api/bhuvan/wms/',
+        url: `${API_BASE}/api/bhuvan/wms/`,
         projection: 'EPSG:4326',
         params: {
           LAYERS: 'LULC250K_1819',
@@ -1360,7 +1360,7 @@ export default function MapView() {
       visible: false,
       opacity: 1,
       source: new TileWMS({
-        url: 'http://192.168.20.57:7000/api/bhuvan/wms/',
+        url: `${API_BASE}/api/bhuvan/wms/`,
         projection: 'EPSG:4326',
         params: {
           LAYERS: 'LULC250K_2425',

@@ -2,7 +2,7 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
-  "proxy": "http://192.168.20.57:5855",
+  "proxy": "http://localhost:7000",
   "dependencies": {
     "bootstrap": "^5.3.8",
     "cesium": "^1.139.1",

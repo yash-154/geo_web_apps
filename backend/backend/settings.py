@@ -172,6 +172,7 @@ MEDIA_ROOT = BASE_DIR / 'media'
 THREE_D_TILES_ROOT = BASE_DIR / 'media_3d_tiles'
 THREE_D_TILES_URL = '/api/3d-tiles/files/'
 MAGO_3D_TILER_JAR = BASE_DIR / 'mago-3d-tiler-1.14.0-release.jar'
+GEOSERVER_BASE_URL = os.getenv('GEOSERVER_BASE_URL', 'http://localhost:5855/geoserver').rstrip('/')
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

@@ -1,0 +1,44 @@
+{
+  "name": "frontend",
+  "version": "0.1.0",
+  "private": true,
+  "proxy": "http://192.168.20.57:5855",
+  "dependencies": {
+    "bootstrap": "^5.3.8",
+    "cesium": "^1.139.1",
+    "ol": "^10.7.0",
+    "proj4": "^2.20.2",
+    "react": "^19.2.4",
+    "react-bootstrap": "^2.10.10",
+    "react-dom": "^19.2.4",
+    "react-scripts": "5.0.1",
+    "shpjs": "^6.2.0"
+  },
+  "scripts": {
+    "postinstall": "node scripts/sync-3d-assets.js",
+    "prestart": "node scripts/sync-3d-assets.js",
+    "prebuild": "node scripts/sync-3d-assets.js",
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}

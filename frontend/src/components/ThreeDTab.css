@@ -1,0 +1,253 @@
+/* =========================
+   3D Panel
+========================= */
+.three-d-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.three-d-panel .raster-section {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.three-d-panel .raster-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #1f2937;
+}
+
+/* 3D Layers Toggle */
+.three-d-layer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.three-d-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 6px 0;
+  flex: 1;
+}
+
+.three-d-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.three-d-zoom-btn {
+  background: none;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 14px;
+  cursor: pointer;
+  color: #374151;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.three-d-zoom-btn:hover {
+  background: #e5e7eb;
+  border-color: #9ca3af;
+}
+
+.three-d-delete-btn {
+  background: none;
+  border: 1px solid #f87171;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 14px;
+  cursor: pointer;
+  color: #dc2626;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.three-d-delete-btn:hover {
+  background: #fef2f2;
+  border-color: #ef4444;
+}
+
+.three-d-underground-row {
+  border-top: 1px solid #e5e7eb;
+  padding-top: 8px;
+  margin-top: 4px;
+}
+
+/* 3D Help Text */
+.three-d-help {
+  font-size: 11px;
+  color: #6b7280;
+  margin-top: 6px;
+}
+
+/* 3D Controls */
+.three-d-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.three-d-tool-select {
+  padding: 6px;
+  border-radius: 4px;
+  border: 1px solid #d1d5db;
+  font-size: 13px;
+  background: #ffffff;
+}
+
+.three-d-analysis-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.three-d-number-field {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.three-d-number-field input,
+.three-d-number-field select {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 7px 8px;
+  font-size: 13px;
+  color: #111827;
+  background: #ffffff;
+}
+
+.three-d-panel .raster-row input[type="text"],
+.three-d-panel .raster-row input[type="number"] {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 7px 8px;
+  font-size: 13px;
+  color: #111827;
+  background: #ffffff;
+}
+
+.three-d-file-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 0;
+}
+
+.three-d-file-list span {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #ffffff;
+  color: #374151;
+  font-size: 11px;
+}
+
+.three-d-attribute-select {
+  padding: 6px;
+  border-radius: 4px;
+  border: 1px solid #d1d5db;
+  font-size: 13px;
+  background: #ffffff;
+}
+
+/* 3D Analysis Buttons */
+.three-d-button {
+  padding: 8px;
+  border-radius: 6px;
+  border: none;
+  background: #1f2937;
+  color: #ffffff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.three-d-button:hover {
+  background: #111827;
+}
+
+.three-d-button:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+.three-d-button.secondary {
+  background: #e5e7eb;
+  color: #111827;
+}
+
+.three-d-button.secondary:hover {
+  background: #d1d5db;
+}
+
+/* 3D Analysis Status */
+.three-d-status {
+  font-size: 11px;
+  color: #6b7280;
+  padding: 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  background: #f9fafb;
+}
+
+.three-d-error {
+  color: #b91c1c;
+  font-weight: 500;
+}
+
+.three-d-success {
+  color: #16a34a;
+  font-weight: 500;
+}
+
+/* 3D Legend */
+.three-d-legend {
+  padding: 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  background: #f9fafb;
+}
+
+.three-d-legend-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 6px;
+}
+
+.three-d-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  margin-bottom: 4px;
+  color: #111827;
+}
+
+.three-d-legend-color {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}

@@ -1,0 +1,47 @@
+/* =========================
+   Query Module
+========================= */
+.query-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.query-box select,
+.query-box input {
+  padding: 6px;
+  border-radius: 4px;
+  border: 1px solid #d1d5db;
+  font-size: 13px;
+}
+
+.query-box button {
+  padding: 6px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.query-box button:first-of-type {
+  background: #2563eb;
+  color: white;
+}
+
+.query-box button:last-of-type {
+  background: #e5e7eb;
+}
+
+.query-suggestion-hint {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.query-value-list {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  padding: 4px;
+  font-size: 12px;
+  background: #ffffff;
+}

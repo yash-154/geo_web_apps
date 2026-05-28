@@ -7,3 +7,4 @@ requests==2.32.3
 urllib3==2.2.2
 certifi==2024.7.4
 whitenoise==6.7.0
+pyshp==2.3.1

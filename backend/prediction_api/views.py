@@ -1,23 +1,63 @@
 import os
+from datetime import datetime
 import json
+import mimetypes
 import re
-import ssl
+import shutil
+import zipfile
+import subprocess
 import struct
+import uuid
 import zlib
-import certifi
 import requests
+import shapefile
 import urllib3
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from django.db import connection
 from django.db.utils import ProgrammingError, OperationalError
-from django.http import HttpResponse
+from django.http import FileResponse, Http404, HttpResponse
 from django.conf import settings
 from django.core.files.storage import FileSystemStorage
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
+from django.views.decorators.csrf import csrf_exempt
+
 from .models import SharedStyleConfig
+
+# Import from services
+from .services.chat_service import build_chat_messages
+from .services.ollama_service import (
+    call_ollama_chat,
+    get_ollama_model_candidates,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+)
+from .utils.text_utils import (
+    normalize_layer_name,
+    normalize_type_phrase,
+    local_greeting_answer,
+    local_tool_help_answer,
+)
+from .utils.regex_utils import (
+    extract_show_layer_request,
+    extract_roads_type_filter_request,
+)
+from .services.intent_service import wants_available_layers
+from .gis.layer_service import (
+    LAYER_TABLE_MAP,
+    layer_label,
+    list_available_layers,
+    available_layers_text,
+    resolve_layer_type_value,
+    count_records_for_type,
+)
+from .gis.spatial_query_service import (
+    run_spatial_query,
+    SAFE_IDENTIFIER,
+)
 
 # Suppress SSL warnings for Bhuvan (self-signed cert)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -56,7 +96,274 @@ _OSM_DATASETS = {
     "water": 'way["waterway"];way["natural"="water"];way["landuse"="reservoir"]',
     "green": 'way["leisure"="park"];way["landuse"="grass"];way["landuse"="forest"]',
 }
+_SHAPEFILE_EXTENSIONS = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".qpj", ".zip"}
+_THREE_D_REGISTRY_FILE = "layers.json"
+_HEIGHT_FIELD_HINTS = ("height", "hgt", "b_height", "b_height_m", "elevation")
+_DEPTH_FIELD_HINTS = ("depth", "dep", "invert", "bottom", "altitude", "z")
+_DIAMETER_FIELD_HINTS = ("diameter", "dia", "diam", "width", "radius")
 
+
+def _three_d_root():
+    root = Path(getattr(settings, "THREE_D_TILES_ROOT", Path(settings.BASE_DIR) / "media_3d_tiles"))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _three_d_registry_path():
+    return _three_d_root() / _THREE_D_REGISTRY_FILE
+
+
+def _load_three_d_registry():
+    registry_path = _three_d_registry_path()
+    if not registry_path.exists():
+        return []
+    try:
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _save_three_d_registry(items):
+    registry_path = _three_d_registry_path()
+    registry_path.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+
+def _safe_display_name(value, fallback):
+    cleaned = re.sub(r"\s+", " ", str(value or "").strip())
+    return cleaned[:80] or fallback
+
+
+def _safe_file_name(value):
+    name = os.path.basename(str(value or ""))
+    stem, ext = os.path.splitext(name)
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._") or "layer"
+    return f"{safe_stem[:80]}{ext.lower()}"
+
+
+def _build_three_d_tile_url(request, layer_id, relative_path="tileset.json"):
+    relative_path = str(relative_path).replace("\\", "/").lstrip("/")
+    return request.build_absolute_uri(
+        f"{getattr(settings, 'THREE_D_TILES_URL', '/api/3d-tiles/files/')}{layer_id}/{relative_path}"
+    )
+
+
+def _three_d_response_item(request, item):
+    payload = dict(item)
+    payload["url"] = _build_three_d_tile_url(request, payload["id"])
+    return payload
+
+
+def _pick_field(fields, hints):
+    lower_fields = [(field.lower(), field) for field in fields]
+    for hint in hints:
+        for lower_field, field in lower_fields:
+            if lower_field == hint or hint in lower_field:
+                return field
+    return ""
+
+
+def _read_shapefile_fields(dbf_path):
+    try:
+        reader = shapefile.Reader(dbf=str(dbf_path))
+        return [
+            field[0]
+            for field in reader.fields[1:]
+            if field and field[0] and field[0] != "DeletionFlag"
+        ]
+    except Exception:
+        return []
+
+
+@csrf_exempt
+@api_view(["GET", "POST"])
+def chat_assistant(request):
+    if request.method == "GET":
+        return Response({
+            "message": "Use POST /api/chat/ with JSON: {question, messages, max_tokens}.",
+            "ok": True,
+        })
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    question = str(payload.get("question") or "").strip()
+    messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+    max_tokens = payload.get("max_tokens", 280)
+
+    if not question:
+        return Response({"error": "question is required."}, status=400)
+
+    try:
+        max_tokens = int(max_tokens)
+    except (TypeError, ValueError):
+        max_tokens = 280
+    max_tokens = max(40, min(700, max_tokens))
+
+    greeting_answer = local_greeting_answer(question, layer_label, list_available_layers)
+    if greeting_answer:
+        return Response({
+            "answer": greeting_answer,
+            "model": "local",
+        })
+
+    tool_help = local_tool_help_answer(question)
+    if tool_help:
+        return Response({
+            "answer": tool_help,
+            "model": "local",
+        })
+
+    # Resolve deployment-specific layer queries locally so responses always reflect
+    # currently configured layers instead of model guesses.
+    if wants_available_layers(question):
+        return Response({
+            "answer": available_layers_text(),
+            "model": "local",
+        })
+
+    # Helper function to resolve roads type filter
+    def resolve_roads_type(raw_value):
+        return resolve_layer_type_value("roads", raw_value, normalize_type_phrase)
+
+    # Provide extra context to the LLM when the user is asking about roads type filters.
+    # This allows the model to summarize results while still returning a map action.
+    chat_action = None
+    extra_system_message = None
+
+    road_type_filter = extract_roads_type_filter_request(question, resolve_roads_type)
+    if road_type_filter:
+        count = count_records_for_type("roads", road_type_filter)
+        count_text = "an unknown number of" if count is None else str(count)
+        extra_system_message = (
+            f"The dataset contains {count_text} roads of type '{road_type_filter}'. "
+            "When answering, provide a brief summary and suggest what the user can do next."
+        )
+        chat_action = {
+            "type": "show_layer_with_filter",
+            "layer": "roads",
+            "filter": {
+                "field": "type",
+                "value": road_type_filter,
+            },
+        }
+
+    requested_raw, requested_layer = extract_show_layer_request(question, normalize_layer_name)
+    if requested_raw:
+        if requested_layer:
+            # Detect 'with name ...' patterns so we can apply a map filter on the layer.
+            name_match = re.search(r"\b(?:with\s+name|named)\s+['\"]?([\w\s\-]+?)['\"]?(?:\s|$)", question, flags=re.IGNORECASE)
+            if name_match:
+                name_value = name_match.group(1).strip()
+                return Response({
+                    "answer": f"Showing {layer_label(requested_layer)} with name '{name_value}' on map.",
+                    "model": "local",
+                    "action": {
+                        "type": "show_layer_with_filter",
+                        "layer": requested_layer,
+                        "filter": {
+                            "field": "name",
+                            "value": name_value,
+                        },
+                    },
+                })
+
+            return Response({
+                "answer": f"Showing {layer_label(requested_layer)} on map.",
+                "model": "local",
+                "action": {
+                    "type": "show_layer",
+                    "layer": requested_layer,
+                },
+            })
+        return Response({
+            "answer": f"Layer '{requested_raw}' is not available. {available_layers_text()}",
+            "model": "local",
+        })
+
+    chat_messages = build_chat_messages(messages, question, extra_system_message)
+
+    def _chat_response_payload(answer, model, extra=None):
+        payload = {"answer": answer, "model": model}
+        if chat_action:
+            payload["action"] = chat_action
+        if extra:
+            payload.update(extra)
+        return payload
+
+    # Chat is configured to run on local Ollama for this deployment.
+    provider = "ollama"
+
+    ollama_error = None
+    if provider in {"ollama", "auto"}:
+        o_resp = None
+        o_req_err = None
+        o_used_model = OLLAMA_MODEL
+        for model_name in get_ollama_model_candidates(OLLAMA_MODEL):
+            o_used_model = model_name
+            o_resp, o_req_err = call_ollama_chat(
+                base_url=OLLAMA_BASE_URL,
+                model=model_name,
+                messages=chat_messages,
+                max_tokens=max_tokens,
+            )
+            if o_resp is None:
+                continue
+            if o_resp.ok:
+                break
+            # Retry model-not-found style failures against variant names.
+            if o_resp.status_code == 404:
+                continue
+            break
+        if o_resp is None:
+            ollama_error = f"Ollama request failed: {str(o_req_err) if o_req_err else 'Unknown network error'}"
+        elif not o_resp.ok:
+            ollama_error = f"Ollama request failed ({o_resp.status_code})."
+            if provider == "ollama":
+                return Response(
+                    _chat_response_payload(
+                        "The language model service is temporarily unavailable. Please try again shortly.",
+                        "fallback",
+                        {
+                            "upstream_error": ollama_error,
+                            "details": (o_resp.text or "").strip()[:300],
+                        },
+                    ),
+                    status=200,
+                )
+        else:
+            try:
+                o_data = o_resp.json()
+            except ValueError:
+                o_data = None
+            if isinstance(o_data, dict):
+                message = o_data.get("message") if isinstance(o_data.get("message"), dict) else {}
+                answer = str(message.get("content") or "").strip()
+                if answer:
+                    return Response(
+                        _chat_response_payload(answer, f"ollama:{o_used_model}"),
+                        status=200,
+                    )
+            if provider == "ollama":
+                return Response(
+                    _chat_response_payload(
+                        "I received an unexpected model response. Please try again.",
+                        "fallback",
+                        {
+                            "upstream_error": "Ollama returned an unexpected payload shape.",
+                            "details": str(type(o_data).__name__),
+                        },
+                    ),
+                    status=200,
+                )
+
+    if provider == "ollama":
+        return Response(
+            _chat_response_payload(
+                "I could not reach the language model right now. Please try again.",
+                "fallback",
+                {"upstream_error": ollama_error or "Ollama request failed."},
+            ),
+            status=200,
+        )
 
 def _style_default_payload():
     return {
@@ -112,6 +419,7 @@ def _save_style_fallback(data):
         json.dump(data, fh)
 
 
+@csrf_exempt
 @api_view(['POST'])
 def analysis_buffer(request):
     """
@@ -241,29 +549,33 @@ def _transparent_tile_response(request, upstream_status=None):
         http_response["X-Proxy-WMS-Error"] = f"Bhuvan {upstream_status}"
     return http_response
 
-# ✅ Layer → Table mapping
-LAYER_TABLE_MAP = {
-    "roads": {
-        "schema": "public",
-        "table": "tbl_roads_pcmc"
-    },
-     "waterbody": {
-        "schema": "public",
-        "table": "tbl_rivers_pcmc"
-    },
-    "landuse": {
-        "schema": "public",
-        "table": "tbl_landuse"
-    },
-      "landmarks": {
-        "schema": "public",
-        "table": "tbl_landmarks"
-    }
-}
 
-	
+@csrf_exempt
+@api_view(['POST'])
+def analysis_spatial_query(request):
+    payload = request.data if isinstance(request.data, dict) else {}
+    reference_layer = payload.get('reference_layer')
+    target_layer = payload.get('target_layer')
+    operator = payload.get('operator', 'inside')
+    distance = payload.get('distance', 100)
+    limit = payload.get('limit', 2500)
 
-_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    if not reference_layer or not target_layer:
+        return Response({'error': 'reference_layer and target_layer are required.'}, status=400)
+
+    result = run_spatial_query(
+        reference_layer=reference_layer,
+        target_layer=target_layer,
+        normalize_func=normalize_layer_name,
+        operator=operator,
+        distance=distance,
+        limit=limit,
+    )
+    if result.get("error"):
+        status_code = 500 if str(result["error"]).startswith("Spatial query failed:") else 400
+        return Response({'error': result["error"]}, status=status_code)
+    return Response(result)
+
 
 @api_view(['GET'])
 def layer_attributes(request):
@@ -331,7 +643,7 @@ def layer_distinct_values(request):
     if layer not in LAYER_TABLE_MAP:
         return Response({'values': []}, status=200)
 
-    if not field or not _SAFE_IDENTIFIER.match(field):
+    if not field or not SAFE_IDENTIFIER.match(field):
         return Response({'error': 'Invalid field.'}, status=400)
 
     schema = LAYER_TABLE_MAP[layer]["schema"]
@@ -376,6 +688,7 @@ def layer_distinct_values(request):
     return Response({'values': values}, status=200)
 
 
+@csrf_exempt
 @api_view(['GET', 'PUT'])
 def style_config(request):
     try:
@@ -481,6 +794,7 @@ def bhuvan_lulc_stats(request):
         )
 
 
+@csrf_exempt
 @api_view(['POST'])
 def upload_raster(request):
     dataset = (request.POST.get('dataset') or 'DEM').strip()
@@ -560,6 +874,487 @@ def list_rasters(request):
 
     items.sort(key=lambda x: x.get('datetime') or '')
     return Response({'items': items})
+
+
+@api_view(['GET'])
+def list_3d_tiles(request):
+    root = _three_d_root()
+    items = []
+    for item in _load_three_d_registry():
+        layer_id = item.get("id")
+        if not layer_id:
+            continue
+        if not (root / layer_id / "tileset.json").exists():
+            continue
+        items.append(_three_d_response_item(request, item))
+    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return Response({"items": items})
+
+
+@csrf_exempt
+@api_view(['POST'])
+def inspect_3d_shapefile_attributes(request):
+    uploaded_files = request.FILES.getlist("files") or request.FILES.getlist("file")
+    if not uploaded_files and request.FILES.get("file"):
+        uploaded_files = [request.FILES["file"]]
+
+    if not uploaded_files:
+        return Response({"error": "Upload a shapefile set to inspect attributes."}, status=400)
+
+    rejected = [
+        upload.name
+        for upload in uploaded_files
+        if os.path.splitext(upload.name)[1].lower() not in _SHAPEFILE_EXTENSIONS
+    ]
+    if rejected:
+        return Response({"error": "Only shapefile files are allowed.", "files": rejected}, status=400)
+
+    inspect_dir = _three_d_root() / "_uploads" / f"inspect_{uuid.uuid4().hex[:12]}"
+    inspect_dir.mkdir(parents=True, exist_ok=True)
+
+    dbf_path = None
+    try:
+        for upload in uploaded_files:
+            filename = _safe_file_name(upload.name)
+            target_path = inspect_dir / filename
+            with target_path.open("wb+") as destination:
+                for chunk in upload.chunks():
+                    destination.write(chunk)
+            # Extract ZIP archives
+            if upload.name.lower().endswith(".zip"):
+                try:
+                    with zipfile.ZipFile(target_path, "r") as zf:
+                        zf.extractall(inspect_dir)
+                except zipfile.BadZipFile:
+                    return Response({"error": f"{filename} is not a valid ZIP archive."}, status=400)
+
+        # Scan for shapefile components (from direct upload or ZIP extraction)
+        for ext in (".dbf", ".shp", ".shx", ".prj", ".cpg", ".qpj"):
+            matches = list(inspect_dir.glob(f"*{ext}"))
+            if matches:
+                # Take the first file with this extension; prefer lower-case basename
+                candidates = sorted(matches, key=lambda p: p.name.lower())
+                if ext == ".dbf":
+                    dbf_path = candidates[0]
+
+        fields = _read_shapefile_fields(dbf_path) if dbf_path else []
+        return Response({
+            "fields": fields,
+            "suggestions": {
+                "heightColumn": _pick_field(fields, _HEIGHT_FIELD_HINTS),
+                "depthColumn": _pick_field(fields, _DEPTH_FIELD_HINTS),
+                "diameterColumn": _pick_field(fields, _DIAMETER_FIELD_HINTS),
+            },
+        })
+    finally:
+        shutil.rmtree(inspect_dir, ignore_errors=True)
+
+
+def _run_subprocess(command, cwd, timeout=3600):
+    result = subprocess.run(
+        command,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    return result
+
+
+def _require_ogr2ogr():
+    """Return True only if ogr2ogr appears runnable.
+
+    Note: ogr2ogr may segfault on some systems/builds; in that case we treat it as unavailable
+    so the API can fall back instead of failing with a misleading "missing ogr2ogr" error.
+    """
+    try:
+        r = subprocess.run(
+            ["ogr2ogr", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        # If a segfault happened, returncode is typically 139.
+        # We treat anything non-zero as unavailable.
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+
+def _preprocess_water_linestring_and_project(input_shp_path, work_dir, diameter_column, height_column=None):
+    """Preprocess SHP for Mago stability:
+    - MultiLineString -> LineString
+    - Remove invalid/empty/too-short/zero-length lines (PostGIS)
+    - Force safe diameter values (PostGIS)
+    - Reproject to EPSG:32643
+
+    Returns path to projected, cleaned SHP.
+    """
+    # Step 1: MultiLineString -> LineString
+    if not _require_ogr2ogr():
+        raise RuntimeError("Missing ogr2ogr in PATH. Install GDAL (ogr2ogr) to run preprocessing.")
+
+    input_shp_path = Path(input_shp_path)
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    base = input_shp_path.stem
+    step1_shp = work_dir / f"{base}_linestring.shp"
+    step2_shp = work_dir / f"{base}_clean.shp"
+    step3_shp = work_dir / f"{base}_32643.shp"
+
+    convert_cmd = [
+        "ogr2ogr",
+        "-overwrite",
+        "-nlt",
+        "LINESTRING",
+        "-skipfailures",
+        str(step1_shp),
+        str(input_shp_path),
+    ]
+
+    print("[PREP] MultiLineString -> LineString", flush=True)
+    print("[PREP CMD]", " ".join(convert_cmd), flush=True)
+    result = _run_subprocess(convert_cmd, cwd=work_dir, timeout=3600)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ogr2ogr LINESTRING conversion failed: "
+            + (result.stderr or result.stdout or "no output")[:2000]
+        )
+
+    # Step 2 & 3: PostGIS cleanup + diameter force
+    # We'll import step1_shp into a temporary table, run SQL, then export back to SHP.
+    # Uses GDAL's PostgreSQL driver via ogr2ogr for import/export.
+    diameter_field = diameter_column or "diameter"
+    safe_diameter_field = diameter_field
+
+    tmp_schema = "public"
+    tmp_table = f"mago_prep_{uuid.uuid4().hex[:10]}"
+
+    # Import into PostGIS temp table
+    # Connection details from Django settings
+    from django.conf import settings as dj_settings
+    db = dj_settings.DATABASES.get("default") or {}
+    conn_str = (
+        f"PG:host={db.get('HOST')} port={db.get('PORT')} user={db.get('USER')} password={db.get('PASSWORD')} dbname={db.get('NAME')}"
+    )
+
+    # (a) create temp table by overwriting
+    import_cmd = [
+        "ogr2ogr",
+        "-overwrite",
+        "-f",
+        "PostgreSQL",
+        conn_str,
+        str(step1_shp),
+        "-nln",
+        f"{tmp_schema}.{tmp_table}",
+        "-lco",
+        "GEOMETRY_NAME=geom",
+    ]
+
+    print("[PREP] Import into PostGIS temp table", flush=True)
+    print("[PREP CMD]", " ".join(import_cmd), flush=True)
+    result = _run_subprocess(import_cmd, cwd=work_dir, timeout=3600)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ogr2ogr PostGIS import failed: "
+            + (result.stderr or result.stdout or "no output")[:2000]
+        )
+
+    # (b) run SQL cleanup
+    cleanup_sql = f"""
+        DELETE FROM {tmp_schema}.{tmp_table}
+        WHERE
+            geom IS NULL
+            OR ST_IsEmpty(geom)
+            OR ST_NPoints(geom) < 2
+            OR ST_Length(geom::geography) = 0;
+
+        UPDATE {tmp_schema}.{tmp_table}
+        SET {safe_diameter_field} =
+            CASE
+                WHEN {safe_diameter_field} IS NULL OR {safe_diameter_field} <= 0 THEN 100
+                ELSE {safe_diameter_field}
+            END;
+    """
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(cleanup_sql)
+    except Exception as e:
+        raise RuntimeError(f"PostGIS cleanup failed: {e}")
+
+    # (c) export back to SHP (still in source CRS)
+    export_cmd = [
+        "ogr2ogr",
+        "-overwrite",
+        "-f",
+        "ESRI Shapefile",
+        str(step2_shp),
+        conn_str,
+        "-sql",
+        f"SELECT * FROM {tmp_schema}.{tmp_table}",
+    ]
+
+    print("[PREP] Export cleaned features back to SHP", flush=True)
+    print("[PREP CMD]", " ".join(export_cmd), flush=True)
+    result = _run_subprocess(export_cmd, cwd=work_dir, timeout=3600)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ogr2ogr PostGIS export failed: "
+            + (result.stderr or result.stdout or "no output")[:2000]
+        )
+
+    # Cleanup temp table
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f"DROP TABLE IF EXISTS {tmp_schema}.{tmp_table};")
+    except Exception:
+        pass
+
+    # Step 4: Reproject to EPSG:32643
+    reproject_cmd = [
+        "ogr2ogr",
+        "-overwrite",
+        "-t_srs",
+        "EPSG:4326",
+        str(step3_shp),
+        str(step2_shp),
+    ]
+
+    print("[PREP] Reproject to EPSG:32643", flush=True)
+    print("[PREP CMD]", " ".join(reproject_cmd), flush=True)
+    result = _run_subprocess(reproject_cmd, cwd=work_dir, timeout=3600)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ogr2ogr reprojection failed: "
+            + (result.stderr or result.stdout or "no output")[:2000]
+        )
+
+    if not step3_shp.exists():
+        raise RuntimeError("Preprocessing failed: projected SHP not found.")
+
+    return step3_shp
+
+
+@csrf_exempt
+@api_view(['POST'])
+def import_3d_tiles(request):
+    uploaded_files = request.FILES.getlist("files") or request.FILES.getlist("file")
+    if not uploaded_files and request.FILES.get("file"):
+        uploaded_files = [request.FILES["file"]]
+
+    if not uploaded_files:
+        return Response({"error": "Upload a shapefile."}, status=400)
+
+    rejected = [
+        upload.name
+        for upload in uploaded_files
+        if os.path.splitext(upload.name)[1].lower() not in _SHAPEFILE_EXTENSIONS
+    ]
+    if rejected:
+        return Response({"error": "Only shapefile files or a ZIP archive are allowed.", "files": rejected}, status=400)
+
+    shp_count = sum(1 for u in uploaded_files if u.name.lower().endswith(".shp"))
+    zip_count = sum(1 for u in uploaded_files if u.name.lower().endswith(".zip"))
+    if zip_count > 1:
+        return Response({"error": "Upload only one ZIP archive at a time."}, status=400)
+    if zip_count == 0 and shp_count != 1:
+        return Response({"error": "Upload exactly one .shp file."}, status=400)
+
+    height_column = (request.POST.get("heightColumn") or "").strip()
+    depth_column = (request.POST.get("depthColumn") or "").strip()
+    diameter_column = (request.POST.get("diameterColumn") or "").strip()
+    crs = (request.POST.get("crs") or "4326").strip() or "4326"
+    if not re.fullmatch(r"\d{3,6}", crs):
+        return Response({"error": "CRS must be an EPSG code like 4326."}, status=400)
+    for label, column in (
+        ("height", height_column),
+        ("depth", depth_column),
+        ("diameter", diameter_column),
+    ):
+        if column and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", column):
+            return Response({"error": f"Invalid {label} column name."}, status=400)
+
+    jar_path = Path(getattr(settings, "MAGO_3D_TILER_JAR", ""))
+    if not jar_path.exists():
+        return Response({"error": f"Mago 3D tiler jar was not found at {jar_path}."}, status=500)
+
+    layer_id = f"mago_{uuid.uuid4().hex[:12]}"
+    root = _three_d_root()
+    upload_dir = root / "_uploads" / layer_id
+    output_dir = root / layer_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_shp_path = None
+    for upload in uploaded_files:
+        filename = _safe_file_name(upload.name)
+        target_path = upload_dir / filename
+        with target_path.open("wb+") as destination:
+            for chunk in upload.chunks():
+                destination.write(chunk)
+        if upload.name.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(target_path, "r") as zf:
+                    zf.extractall(upload_dir)
+            except zipfile.BadZipFile:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+                shutil.rmtree(output_dir, ignore_errors=True)
+                return Response({"error": f"{filename} is not a valid ZIP archive."}, status=400)
+        elif upload.name.lower().endswith(".shp"):
+            saved_shp_path = target_path
+
+    # If a ZIP was extracted, find the .shp inside the upload directory
+    if not saved_shp_path:
+        matches = list(upload_dir.glob("*.shp"))
+        if matches:
+            saved_shp_path = sorted(matches, key=lambda p: p.name.lower())[0]
+
+    if not saved_shp_path:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        return Response({"error": "Missing .shp file."}, status=400)
+
+    # --- Preprocess to stabilize Mago for utility/pipe datasets ---
+    # If ogr2ogr/GDAL preprocessing fails (including segfault), fall back to running Mago
+    # on the original uploaded SHP so the import endpoint remains usable.
+    projected_shp_path = None
+    prep_warning = None
+    try:
+        diameter_col_for_prep = diameter_column or "diameter"
+        print(f"[PREP START] layer_id={layer_id} input={saved_shp_path}", flush=True)
+        projected_shp_path = _preprocess_water_linestring_and_project(
+            input_shp_path=saved_shp_path,
+            work_dir=upload_dir,
+            diameter_column=diameter_col_for_prep,
+            height_column=height_column,
+        )
+        print(f"[PREP DONE] projected_shp={projected_shp_path}", flush=True)
+    except Exception as err:
+        prep_warning = str(err)
+        # Fall back to original SHP (still uses Mago -c 32643 as configured below)
+        projected_shp_path = saved_shp_path
+        print(f"[PREP SKIP] layer_id={layer_id} warning={prep_warning}", flush=True)
+
+
+    # Mago 1.7.0 pipe conversion is unstable with MultiLineString; always run with EPSG:32643.
+    command = [
+        "java",
+        "-jar",
+        str(jar_path),
+        "--input",
+        str(projected_shp_path),
+        "--inputType",
+        "SHP",
+        "-c",
+        "4326",
+    ]
+    if height_column:
+        command.extend(["-hc", height_column])
+    if diameter_column:
+        command.extend(["-dc", diameter_column])
+    command.extend(["--output", str(output_dir)])
+
+    try:
+        print(f"[MAGO START] layer_id={layer_id} input={saved_shp_path} output={output_dir}", flush=True)
+        print("[MAGO CMD]", " ".join(command), flush=True)
+        result = subprocess.run(
+            command,
+            cwd=str(Path(settings.BASE_DIR)),
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            check=False,
+        )
+        print(f"[MAGO DONE] returncode={result.returncode}", flush=True)
+        if result.stdout:
+            print(f"[MAGO STDOUT] {result.stdout[:2000]}", flush=True)
+        if result.stderr:
+            print(f"[MAGO STDERR] {result.stderr[:2000]}", flush=True)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        return Response({"error": "Mago 3D tiler timed out while creating tiles."}, status=504)
+    except OSError as err:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        return Response({"error": f"Unable to run Java/Mago tiler: {err}"}, status=500)
+
+    tileset_path = output_dir / "tileset.json"
+    if not tileset_path.exists():
+        shutil.rmtree(output_dir, ignore_errors=True)
+        print(f"[MAGO FAILED] tileset.json not found at {tileset_path}", flush=True)
+        return Response({
+            "error": "Mago 3D tiler failed.",
+            "preprocessing": "MultiLineString->LineString + PostGIS cleanup + EPSG:32643 projection performed before running Mago.",
+            "returncode": result.returncode,
+            "command": " ".join(command),
+            "stdout": (result.stdout or "")[-4000:],
+            "stderr": (result.stderr or "")[-4000:],
+        }, status=500)
+
+    display_name = _safe_display_name(request.POST.get("name"), saved_shp_path.stem)
+    item = {
+        "id": layer_id,
+        "name": display_name,
+        "source": saved_shp_path.name,
+        "heightColumn": height_column,
+        "depthColumn": depth_column,
+        "diameterColumn": diameter_column,
+        "crs": crs,
+        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    items = [existing for existing in _load_three_d_registry() if existing.get("id") != layer_id]
+    items.append(item)
+    _save_three_d_registry(items)
+
+    resp = Response(_three_d_response_item(request, item), status=201)
+    if prep_warning:
+        resp.data["warning"] = f"Preprocessing skipped due to ogr2ogr/GDAL error: {prep_warning}" 
+    return resp
+
+
+
+@csrf_exempt
+@api_view(['DELETE'])
+def delete_3d_tiles(request, layer_id):
+    """Delete a 3D tileset layer and its files."""
+    root = _three_d_root().resolve()
+    safe_layer_id = re.sub(r"[^A-Za-z0-9_-]+", "", layer_id)
+    if safe_layer_id != layer_id:
+        return Response({"error": "Invalid layer ID."}, status=400)
+
+    layer_root = (root / safe_layer_id).resolve()
+    upload_root = (root / "_uploads" / safe_layer_id).resolve()
+
+    for target in (layer_root, upload_root):
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+
+    return Response({"deleted": safe_layer_id})
+
+
+def serve_3d_tile_file(request, layer_id, path="tileset.json"):
+    root = _three_d_root().resolve()
+    safe_layer_id = re.sub(r"[^A-Za-z0-9_-]+", "", layer_id)
+    if safe_layer_id != layer_id:
+        raise Http404
+
+    layer_root = (root / safe_layer_id).resolve()
+    relative_path = Path(path or "tileset.json")
+    file_path = (layer_root / relative_path).resolve()
+    if layer_root not in file_path.parents or not file_path.is_file():
+        raise Http404
+
+    content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+    if file_path.suffix.lower() == ".json":
+        content_type = "application/json"
+    elif file_path.suffix.lower() == ".b3dm":
+        content_type = "application/octet-stream"
+    return FileResponse(file_path.open("rb"), content_type=content_type)
 
 
 @api_view(['GET'])
@@ -896,6 +1691,7 @@ def _overpass_to_feature_collection(elements, category):
     return {"type": "FeatureCollection", "features": features}
 
 
+@csrf_exempt
 @api_view(["POST"])
 def osm_query(request):
     payload = request.data if isinstance(request.data, dict) else {}

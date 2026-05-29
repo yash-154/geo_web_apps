@@ -3,7 +3,7 @@ export const INITIAL_LAYERS = [
   {
     id: 'roads',
     title: '🛣 Roads',
-    layerName: 'yash_practise:roads_pcmc',
+    layerName: 'yash_practise:tbl_roads_pcmc',
     apiLayer: 'roads',
     geometryType: 'line',
     visible: false,
@@ -17,7 +17,7 @@ export const INITIAL_LAYERS = [
   {
     id: 'Water Body',
     title: 'Water Body',
-    layerName: 'yash_practise:pcmc_waterbody',
+    layerName: 'yash_practise:tbl_rivers_pcmc',
     apiLayer: 'waterbody',
     geometryType: 'polygon',
     visible: false,
@@ -31,7 +31,7 @@ export const INITIAL_LAYERS = [
   {
     id: 'Land Use',
     title: 'Land Use',
-    layerName: 'yash_practise:landuse_pcmc',
+    layerName: 'yash_practise:tbl_landuse',
     apiLayer: 'landuse',
     geometryType: 'polygon',
     visible: false,
@@ -45,7 +45,7 @@ export const INITIAL_LAYERS = [
   {
     id: 'Landmarks',
     title: 'Landmarks',
-    layerName: 'yash_practise:city_landmarks',
+    layerName: 'yash_practise:tbl_landmarks',
     apiLayer: 'landmarks',
     geometryType: 'point',
     visible: false,
